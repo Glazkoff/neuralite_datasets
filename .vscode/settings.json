@@ -1,0 +1,20 @@
+{
+  "python.formatting.provider": "ms-python.black-formatter",
+  "[python]": {
+    "editor.defaultFormatter": "ms-python.black-formatter",
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.organizeImports": true
+    }
+  },
+  "isort.args": ["--profile", "black"],
+  "sqltools.useNodeRuntime": true,
+  "sqltools.connections": [
+    {
+      "previewLimit": 100,
+      "driver": "SQLite",
+      "name": "DialogSum DB",
+      "database": "${workspaceFolder:neuralite_datasets}/scripts/data.db"
+    }
+  ]
+}

@@ -1,0 +1,379 @@
+import asyncio
+import json
+import sqlite3
+import time
+
+import openai
+import translators as ts
+from datasets import Dataset, load_dataset
+
+FROM_LANGUAGE, TO_LANGUAGE = "en", "ru"
+TS_ENGINE = "google"
+DB_FILE = "data.db"
+DIALOG_SUMMARIZATION_DATASETS = [
+    "DialogSum",
+    "AMI",
+    "CRD3",
+    "ECTSum",
+    "ICSI",
+    "MediaSum",
+    "QMSum",
+    "SAMSum",
+    "TweetSumm",
+    "ConvoSumm",
+    "SummScreen_ForeverDreaming",
+    "SummScreen_TVMegaSite",
+]
+
+
+def translate(
+    text: str,
+    from_lang: str = FROM_LANGUAGE,
+    to_lang: str = TO_LANGUAGE,
+    ts_engine: str = TS_ENGINE,
+) -> str:
+    """Translates text from one language to another using translators library.
+
+    Args:
+        text (str): Text to translate.
+        from_lang (str): Source language code.
+        to_lang (str): Target language code.
+        ts_engine (str): translators library translation engine to use.
+
+    Returns:
+        str: Translated text.
+    """
+    return ts.translate_text(text, ts_engine, from_lang, to_lang) if text else ""
+
+
+def translate_chatgpt(
+    text: str,
+) -> str:
+    """Translates text from English to Russian using ChatGPT API.
+
+    Args:
+        text (str): Text to translate.
+
+    Returns:
+        str: Translated text.
+    """
+    try:
+        # token = os.environ.get("OPEN_AI_TOKEN")
+        token = "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"
+
+        openai.api_key = token
+        messages = [
+            {
+                "content": "Translate this text from English to Russian. Write only in Russian. Text:",
+                "role": "system",
+            },
+            {"role": "user", "content": text},
+        ]
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=messages,
+        )
+        return response.choices[0].message.get("content", "")
+    except openai.error.RateLimitError as e:
+        time.sleep(20)
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=messages,
+        )
+        return response.choices[0].message.get("content", "")
+
+
+def create_db_table():
+    """Creates SQLite database to store translation data."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dialogsum_translation
+            (original_dialog_id TEXT, 
+            new_dialog_id TEXT, 
+            dialog_index INT, 
+            original_dialog_info TEXT,  
+            log TEXT, 
+            prompt TEXT,
+            translated_original_dialog_info TEXT,
+            translated_log TEXT,
+            chatgpt_translated_original_dialog_info TEXT,
+            chatgpt_translated_log TEXT,
+            split TEXT,
+            status TEXT)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def upload_dataset(dataset: Dataset):
+    """Uploads dataset into database."""
+    create_db_table()
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    added_rows_count = 0
+    for split in dataset:
+        added_rows_count += len(dataset[split])
+        for row in dataset[split]:
+            # Dump all data to JSON
+            dataset_values = [
+                json.dumps(item) if not isinstance(item, str) else item
+                for item in list(row.values())
+            ]
+            values = dataset_values + ["", "", "", "", str(split), "pending"]
+            placeholders = ", ".join(["?" for _ in values])
+            c.execute(
+                f"INSERT INTO dialogsum_translation VALUES ({placeholders})",
+                values,
+            )
+    conn.commit()
+    conn.close()
+
+    print(f"Added rows count: {added_rows_count}")
+
+
+def get_row_by_new_dialog_id(new_dialog_id: str) -> dict:
+    """Retrieves a single row from database by new_dialog_id.
+
+    Args:
+        new_dialog_id (str): new_dialog_id value to query
+
+    Returns:
+        dict: Row data
+    """
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+
+    query = "SELECT * FROM dialogsum_translation WHERE new_dialog_id = ?"
+    c.execute(query, (new_dialog_id,))
+    row = c.fetchone()
+
+    conn.close()
+
+    if row:
+        return dict(row)
+    else:
+        print("Row not found.")
+
+
+def translate_original_dialog_info(row_dict: dict) -> dict:
+    """Function for translating original_dialog_info column
+
+    Args:
+        row_dict (dict): Original values from DB rows
+
+    Returns:
+        dict: DB row filled with translations
+    """
+    if row_dict["translated_original_dialog_info"] != "":
+        return row_dict
+    # Parse JSON
+    original_dialog_info = json.loads(row_dict["original_dialog_info"])
+    # Translate using API
+    translated_original_dialog_info = dict()
+    translated_original_dialog_info["summary"] = translate(
+        original_dialog_info["summary"]
+    )
+    translated_original_dialog_info["topic"] = translate(original_dialog_info["topic"])
+    # Dumps JSON
+    row_dict["translated_original_dialog_info"] = json.dumps(
+        translated_original_dialog_info, ensure_ascii=False
+    )
+    return row_dict
+
+
+def chatgpt_translate_original_dialog_info(row_dict: dict) -> dict:
+    """Function for translating original_dialog_info column
+
+    Args:
+        row_dict (dict): Original values from DB rows
+
+    Returns:
+        dict: DB row filled with translations
+    """
+    if row_dict["chatgpt_translated_original_dialog_info"] != "":
+        return row_dict
+    # Parse JSON
+    original_dialog_info = json.loads(row_dict["original_dialog_info"])
+    # Translate using OpenAI API
+    chatgpt_translated_original_dialog_info = dict()
+    chatgpt_translated_original_dialog_info["summary"] = translate_chatgpt(
+        original_dialog_info["summary"]
+    )
+    chatgpt_translated_original_dialog_info["topic"] = translate_chatgpt(
+        original_dialog_info["topic"]
+    )
+    # Dumps JSON
+    row_dict["chatgpt_translated_original_dialog_info"] = json.dumps(
+        chatgpt_translated_original_dialog_info, ensure_ascii=False
+    )
+    return row_dict
+
+
+def translate_log(row_dict: dict) -> dict:
+    """Translates log column using translators library.
+
+    Args:
+        row_dict (dict): Row data
+
+    Returns:
+        dict: Updated row data with translations
+    """
+
+    if row_dict["translated_log"] != "":
+        return row_dict
+
+    log = json.loads(row_dict["log"])
+
+    translated_log = []
+    history = ""
+
+    for i, turn in enumerate(log):
+        translated_turn = {}
+
+        for k, v in turn.items():
+            if k == "user utterance" or k == "system response":
+                translated_v = translate(v)
+            else:
+                translated_v = v
+
+            translated_turn[k] = translated_v
+
+            if k == "dialog history":
+                if i == 0:
+                    continue
+                history += f"<USER> {translated_log[i-1]['user utterance']} "
+                history += f"<SYSTEM> {translated_log[i-1]['system response']} "
+                translated_turn[k] = history
+
+        translated_log.append(translated_turn)
+
+    row_dict["translated_log"] = json.dumps(translated_log, ensure_ascii=False)
+
+    return row_dict
+
+
+def chatgpt_translate_log(row_dict: dict) -> dict:
+    """Translates log column using ChatGPT API.
+
+    Args:
+        row_dict (dict): Row data
+
+    Returns:
+        dict: Updated row data with translations
+    """
+    if row_dict["chatgpt_translated_log"] != "":
+        return row_dict
+
+    log = json.loads(row_dict["log"])
+
+    chatgpt_translated_log = []
+    history = ""
+
+    for i, turn in enumerate(log):
+        chatgpt_translated_turn = {}
+
+        for k, v in turn.items():
+            if k == "user utterance" or k == "system response":
+                chatgpt_translated_v = translate_chatgpt(v)
+            else:
+                chatgpt_translated_v = v
+
+            chatgpt_translated_turn[k] = chatgpt_translated_v
+
+            if k == "dialog history":
+                if i == 0:
+                    continue
+                history += f"<USER> {chatgpt_translated_log[i-1]['user utterance']} "
+                history += f"<SYSTEM> {chatgpt_translated_log[i-1]['system response']} "
+                chatgpt_translated_turn[k] = history
+
+        chatgpt_translated_log.append(chatgpt_translated_turn)
+
+    row_dict["chatgpt_translated_log"] = json.dumps(
+        chatgpt_translated_log, ensure_ascii=False
+    )
+
+    return row_dict
+
+
+def update_row(new_dialog_id: str, data: dict):
+    """Updates a database row.
+
+    Args:
+        new_dialog_id (str): id of row to update
+        data (dict): updated data values
+
+    """
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+
+    set_clause = ", ".join([f"{key} = ?" for key in data.keys()])
+    values = list(data.values())
+    values.append(new_dialog_id)
+
+    query = f"UPDATE dialogsum_translation SET {set_clause} WHERE new_dialog_id = ?"
+
+    c.execute(query, values)
+    conn.commit()
+
+    conn.close()
+
+
+async def row_translating_task(new_dialog_id: str) -> bool:
+    """Performs full translation workflow for a single row.
+
+    Args:
+        new_dialog_id (str): id of row to process
+
+    Returns:
+        bool: True if successful otherwise False
+    """
+    try:
+        print(f"[Step 0/5] Start task for {new_dialog_id}")
+        start_time = time.time()
+        row_dict = get_row_by_new_dialog_id(new_dialog_id)
+        if row_dict["status"] == "translated":
+            return True
+        row_dict = translate_original_dialog_info(row_dict)
+        print(f"[Step 1/5] Done for {new_dialog_id} ({time.time() - start_time}s)")
+        row_dict = chatgpt_translate_original_dialog_info(row_dict)
+        print(f"[Step 2/5] Done for {new_dialog_id} ({time.time() - start_time}s)")
+        row_dict = translate_log(row_dict)
+        print(f"[Step 3/5] Done for {new_dialog_id} ({time.time() - start_time}s)")
+        row_dict = chatgpt_translate_log(row_dict)
+        print(f"[Step 4/5] Done for {new_dialog_id} ({time.time() - start_time}s)")
+        row_dict["status"] = "translated"
+        update_row(new_dialog_id, row_dict)
+        print(f"[Step 5/5] Done for {new_dialog_id} ({time.time() - start_time}s)")
+        return True
+    except Exception as e:
+        print(e)
+        return False
+
+
+async def translate_rows():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+
+    await create_db_table()
+
+    c.execute(
+        "SELECT new_dialog_id FROM dialogsum_translation WHERE status = 'pending'"
+    )
+    rows = c.fetchall()
+    conn.close()
+
+    tasks = []
+    for row in rows:
+        task = asyncio.create_task(row_translating_task(row[0]))
+        tasks.append(task)
+
+    await asyncio.gather(*tasks)
+
+
+if __name__ == "__main__":
+    asyncio.run(translate_rows())

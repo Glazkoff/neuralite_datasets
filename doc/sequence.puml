@@ -1,0 +1,35 @@
+@startuml Translation script sequence
+participant "Script" as Script  
+participant "SQLite" as DB
+participant "Translation API" as API
+participant "ChatGPT Model" as Model
+
+Script -> DB: Create table
+activate DB
+DB-->>Script: Confirm
+Script -> DB: Load dataset data
+DB-->>Script: Confirm
+
+loop For each row
+    Script -> DB: Get row
+    DB-->>Script: Return row
+
+    alt Translate with API
+        Script -> API: Translate text
+        activate API
+        API-->>Script: Translated text
+        deactivate API
+    else Translate with ChatGPT
+        Script -> Model: Translation request
+        activate Model
+        Model-->>Script: Translated text
+        deactivate Model
+    end
+    
+    Script -> DB: Update translation
+    DB-->>Script: Confirm
+end
+
+Script-->>DB: Close connection
+deactivate DB
+@enduml

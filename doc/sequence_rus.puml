@@ -1,0 +1,35 @@
+@startuml Translation script sequence
+participant "Скрипт" as Script  
+participant "SQLite" as DB
+participant "API перевода" as API
+participant "ChatGPT API" as Model
+
+Script -> DB: Создать таблицу
+activate DB
+DB-->>Script: Подтверждение
+Script -> DB: Загрузить изначальный датасет
+DB-->>Script: Подтверждение
+
+loop Для каждой строки в БД
+    Script -> DB: Получить запись
+    DB-->>Script: Запись в БД
+
+    alt Перевод с помощью API сервиса перевода
+        Script -> API: Текст для перевода
+        activate API
+        API-->>Script: Переведённый текст
+        deactivate API
+    else Перевести с помощью ChatGPT API
+        Script -> Model: Запрос для перевода
+        activate Model
+        Model-->>Script: Переведённый текст
+        deactivate Model
+    end
+    
+    Script -> DB: Обновить поля перевода
+    DB-->>Script: Подтверждение
+end
+
+Script-->>DB: Закрыть соединение
+deactivate DB
+@enduml
