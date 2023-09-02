@@ -31,13 +31,15 @@ DIALOG_SUMMARIZATION_DATASETS = [
     "SummScreen_TVMegaSite",
 ]
 API_KEYS = []
+BLACKLISTED_KEYS = set()
+CURRENT_PATH = Path(__file__).resolve().parent
 
 
 # Initialize OpenAI API
 def initialize_openai_api():
     api_keys_file = "api_keys.txt"
-    current_path = Path(__file__).resolve().parent
-    keys_path = current_path / api_keys_file
+
+    keys_path = CURRENT_PATH / api_keys_file
     if not keys_path.is_file():
         print(f"API keys file '{keys_path}' not found.")
         sys.exit(1)
@@ -68,6 +70,16 @@ def translate(
     return ts.translate_text(text, ts_engine, from_lang, to_lang) if text else ""
 
 
+def get_random_api_key():
+    # Exclude blacklisted keys
+    available_keys = [key for key in API_KEYS if key not in BLACKLISTED_KEYS]
+    if not available_keys:
+        print("All API keys are blacklisted.")
+        sys.exit(1)
+
+    return random.choice(available_keys)
+
+
 async def translate_chatgpt(text: str, retry_attempt: int = 0) -> str:
     """Translates text from English to Russian using ChatGPT API.
 
@@ -81,9 +93,7 @@ async def translate_chatgpt(text: str, retry_attempt: int = 0) -> str:
         if retry_attempt != 0:
             print(f"OpenAI retry attempt: {retry_attempt}")
 
-        random_index = random.randint(0, len(API_KEYS) - 1)
-        # key_index = retry_attempt % len(API_KEYS)
-        token = API_KEYS[random_index]
+        token = get_random_api_key()
         openai.api_key = token
         messages = [
             {
@@ -100,6 +110,13 @@ async def translate_chatgpt(text: str, retry_attempt: int = 0) -> str:
     except openai.error.RateLimitError as e:
         if retry_attempt > 2:
             await asyncio.sleep(3 * retry_attempt)
+        return await translate_chatgpt(text, retry_attempt + 1)
+    except openai.error.AuthenticationError as e:
+        print(f"API key is incorrect or blacklisted: {token}")
+        BLACKLISTED_KEYS.add(token)
+        with open(CURRENT_PATH / "blacklisted_keys.txt", "w") as file:
+            for key in BLACKLISTED_KEYS:
+                file.write(key + "\n")
         return await translate_chatgpt(text, retry_attempt + 1)
 
 

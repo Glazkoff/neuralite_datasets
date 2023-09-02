@@ -145,3 +145,4 @@ data.db
 dialogsum
 dialogsum_translation
 api_keys.txt
+blacklisted_keys.txt
