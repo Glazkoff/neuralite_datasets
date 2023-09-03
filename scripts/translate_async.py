@@ -11,9 +11,10 @@ import dotenv
 import openai
 import translators as ts
 from datasets import Dataset, load_dataset
+from prompts import TRANSLATE_JSON
 
 FROM_LANGUAGE, TO_LANGUAGE = "en", "ru"
-MAX_CONCURRENCY = 5
+MAX_CONCURRENCY = 3
 TS_ENGINE = "google"
 DB_FILE = "data.db"
 DIALOG_SUMMARIZATION_DATASETS = [
@@ -70,9 +71,11 @@ def translate(
     return ts.translate_text(text, ts_engine, from_lang, to_lang) if text else ""
 
 
-def get_random_api_key():
+def get_random_api_key(prev_key):
     # Exclude blacklisted keys
-    available_keys = [key for key in API_KEYS if key not in BLACKLISTED_KEYS]
+    available_keys = [
+        key for key in API_KEYS if key not in BLACKLISTED_KEYS.union(set([prev_key]))
+    ]
     if not available_keys:
         print("All API keys are blacklisted.")
         sys.exit(1)
@@ -80,7 +83,9 @@ def get_random_api_key():
     return random.choice(available_keys)
 
 
-async def translate_chatgpt(text: str, retry_attempt: int = 0) -> str:
+async def translate_chatgpt(
+    text: str, retry_attempt: int = 0, prev_key: str = ""
+) -> str:
     """Translates text from English to Russian using ChatGPT API.
 
     Args:
@@ -93,7 +98,7 @@ async def translate_chatgpt(text: str, retry_attempt: int = 0) -> str:
         if retry_attempt != 0:
             print(f"OpenAI retry attempt: {retry_attempt}")
 
-        token = get_random_api_key()
+        token = get_random_api_key(prev_key)
         openai.api_key = token
         messages = [
             {
@@ -108,16 +113,64 @@ async def translate_chatgpt(text: str, retry_attempt: int = 0) -> str:
         )
         return response.choices[0].message.get("content", "")
     except openai.error.RateLimitError as e:
-        if retry_attempt > 2:
-            await asyncio.sleep(3 * retry_attempt)
-        return await translate_chatgpt(text, retry_attempt + 1)
+        if retry_attempt > 1:
+            await asyncio.sleep(20)
+        return await translate_chatgpt(text, retry_attempt + 1, token)
     except openai.error.AuthenticationError as e:
         print(f"API key is incorrect or blacklisted: {token}")
         BLACKLISTED_KEYS.add(token)
         with open(CURRENT_PATH / "blacklisted_keys.txt", "w") as file:
             for key in BLACKLISTED_KEYS:
                 file.write(key + "\n")
-        return await translate_chatgpt(text, retry_attempt + 1)
+        return await translate_chatgpt(text, retry_attempt + 1, token)
+
+
+async def translate_json_chatgpt(
+    json_str: str, retry_attempt: int = 0, prev_key: str = ""
+) -> str:
+    """Translates JSON from English to Russian using ChatGPT API.
+
+    Args:
+        text (str): stringified JSON to translate.
+
+    Returns:
+        str: Translated stringified JSON.
+    """
+    try:
+        token = get_random_api_key(prev_key)
+
+        if retry_attempt != 0:
+            print(f"(JSON - {token}) OpenAI retry attempt: {retry_attempt}")
+
+        openai.api_key = token
+        messages = [
+            {
+                "content": TRANSLATE_JSON.format(json_str),
+                "role": "system",
+            },
+        ]
+        response = await openai.ChatCompletion.acreate(
+            model="gpt-3.5-turbo",
+            messages=messages,
+        )
+        result = response.choices[0].message.get("content", "")
+        try:
+            _ = json.loads(result)
+        except json.JSONDecodeError as e:
+            print(f"Input string is not valid JSON. Error: {e}")
+            return await translate_json_chatgpt(json_str, retry_attempt + 1, token)
+        return result
+    except openai.error.RateLimitError as e:
+        if retry_attempt > 1:
+            await asyncio.sleep(2)
+        return await translate_json_chatgpt(json_str, retry_attempt + 1, token)
+    except openai.error.AuthenticationError as e:
+        print(f"API key is incorrect or blacklisted: {token}")
+        BLACKLISTED_KEYS.add(token)
+        with open(CURRENT_PATH / "blacklisted_keys.txt", "w") as file:
+            for key in BLACKLISTED_KEYS:
+                file.write(key + "\n")
+        return await translate_json_chatgpt(json_str, retry_attempt + 1, token)
 
 
 async def create_db_table():
@@ -251,6 +304,11 @@ async def chatgpt_translate_original_dialog_info(row_dict: dict) -> dict:
     row_dict["chatgpt_translated_original_dialog_info"] = json.dumps(
         chatgpt_translated_original_dialog_info, ensure_ascii=False
     )
+
+    # TODO: work on optimization
+    # row_dict["chatgpt_translated_original_dialog_info"] = await translate_json_chatgpt(
+    #     row_dict["original_dialog_info"]
+    # )
     return row_dict
 
 
@@ -316,7 +374,6 @@ async def chatgpt_translate_log(row_dict: dict) -> dict:
 
     for i, turn in enumerate(log):
         chatgpt_translated_turn = {}
-
         for k, v in turn.items():
             if k == "user utterance" or k == "system response":
                 chatgpt_translated_v = await translate_chatgpt(v)
@@ -337,6 +394,9 @@ async def chatgpt_translate_log(row_dict: dict) -> dict:
     row_dict["chatgpt_translated_log"] = json.dumps(
         chatgpt_translated_log, ensure_ascii=False
     )
+
+    # TODO: work on optimization
+    # row_dict["chatgpt_translated_log"] = await translate_json_chatgpt(row_dict["log"])
 
     return row_dict
 
@@ -394,7 +454,9 @@ async def row_translating_task(
             print(f"[Step 4/5] Done for {new_dialog_id} ({time.time() - start_time}s)")
             row_dict["status"] = "translated"
             await update_row(new_dialog_id, row_dict)
+            print("---")
             print(f"[Step 5/5] Done for {new_dialog_id} ({time.time() - start_time}s)")
+            print("---")
             return True
         except Exception as e:
             print(e)

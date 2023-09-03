@@ -1,0 +1,5 @@
+aiosqlite==0.17.0
+datasets==2.7.2
+dotenv==0.21.0
+openai==0.26.5
+translators==4.11.0
